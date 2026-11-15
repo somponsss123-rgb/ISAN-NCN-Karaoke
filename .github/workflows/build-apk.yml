@@ -1,4 +1,4 @@
-
+  
 name: Build ISAN Karaoke EMK APK
 
 on:
@@ -8,41 +8,42 @@ permissions:
   contents: read
 
 jobs:
-  build-apk:
+  build-emk-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 50
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract EMK ZIP
+      - name: Find and extract existing EMK ZIP
         shell: bash
         run: |
           set -euo pipefail
           FOUND=0
+          DEST="$RUNNER_TEMP/emk-source"
 
-          while IFS= read -r ZIP; do
-            echo "Checking: $ZIP"
-            DEST="$RUNNER_TEMP/emk-source"
+          while IFS= read -r -d '' ZIP; do
+            echo "Checking ZIP: $ZIP"
             rm -rf "$DEST"
             mkdir -p "$DEST"
 
-            if ! unzip -tq "$ZIP" >/dev/null; then
+            if ! unzip -tq "$ZIP" >/dev/null 2>&1; then
+              echo "Skipping invalid ZIP: $ZIP"
               continue
             fi
-
             unzip -q "$ZIP" -d "$DEST"
 
-            while IFS= read -r -d '' FILE; do
-              DIR="$(dirname "$FILE")"
+            while IFS= read -r -d '' SETTINGS; do
+              DIR="$(dirname "$SETTINGS")"
+              HTML="$DIR/app/src/main/assets/www/index.html"
 
-              if grep -q 'ISANKaraokeEMK' "$FILE" \
-                && test -f "$DIR/package.json" \
-                && test -f "$DIR/app/src/main/assets/www/index.html" \
-                && grep -qi '\.emk' "$DIR/app/src/main/assets/www/index.html"; then
+              if grep -q 'ISANKaraokeEMK' "$SETTINGS" \
+                 && test -f "$DIR/package.json" \
+                 && test -f "$HTML" \
+                 && grep -qi '\.emk' "$HTML"; then
                 echo "APP_DIR=$DIR" >> "$GITHUB_ENV"
-                echo "Selected ZIP: $ZIP"
+                echo "Selected EMK ZIP: $ZIP"
                 FOUND=1
                 break
               fi
@@ -51,60 +52,69 @@ jobs:
             if [ "$FOUND" -eq 1 ]; then
               break
             fi
-
-          done < <(find . -maxdepth 2 -type f -iname '*emk*.zip' | sort -r)
+          done < <(find . -maxdepth 2 -type f -iname '*emk*.zip' -print0 | sort -zr)
 
           if [ "$FOUND" -ne 1 ]; then
-            echo "ERROR: No valid EMK Android ZIP found"
+            echo "ERROR: No ZIP with a valid EMK Android project found."
+            echo "ZIP files in repository:"
+            find . -maxdepth 2 -type f -iname '*.zip' -print
             exit 1
           fi
 
-      - name: Setup Java
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Node.js
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '14742923'
 
-      - name: Install SDK
+      - name: Install Android API 35
+        shell: bash
         run: |
-          sdkmanager --install \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
+          set -euo pipefail
+          sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
 
-      - name: Setup Gradle
+      - name: Setup Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Install audio libraries
+      - name: Install and bundle audio libraries
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           cd "$APP_DIR"
           npm install --no-audit --no-fund
           npm run assets
+          VENDOR='app/src/main/assets/www/vendor'
+          test -s "$VENDOR/libfluidsynth-2.4.6.js"
+          test -s "$VENDOR/js-synthesizer.min.js"
+          test -s "$VENDOR/jszip.min.js"
 
-      - name: Build APK
+      - name: Build EMK APK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           cd "$APP_DIR"
           gradle --no-daemon --stacktrace :app:assembleDebug
 
       - name: Prepare APK
         shell: bash
         run: |
+          set -euo pipefail
+          SRC="$APP_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$SRC"
           mkdir -p release
-          cp "$APP_DIR/app/build/outputs/apk/debug/app-debug.apk" \
-            release/ISAN-Karaoke-EMK.apk
+          cp "$SRC" release/ISAN-Karaoke-EMK.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
