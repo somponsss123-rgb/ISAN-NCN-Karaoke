@@ -1,44 +1,114 @@
-name: Build ISAN NCN Karaoke APK
+
+name: Build ISAN Karaoke EMK APK
 
 on:
   workflow_dispatch:
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+permissions:
+  contents: read
 
-      - uses: actions/setup-java@v4
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find and extract EMK ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          FOUND=0
+
+          while IFS= read -r ZIP; do
+            echo "Checking: $ZIP"
+            DEST="$RUNNER_TEMP/emk-source"
+            rm -rf "$DEST"
+            mkdir -p "$DEST"
+
+            if ! unzip -tq "$ZIP" >/dev/null; then
+              continue
+            fi
+
+            unzip -q "$ZIP" -d "$DEST"
+
+            while IFS= read -r -d '' FILE; do
+              DIR="$(dirname "$FILE")"
+
+              if grep -q 'ISANKaraokeEMK' "$FILE" \
+                && test -f "$DIR/package.json" \
+                && test -f "$DIR/app/src/main/assets/www/index.html" \
+                && grep -qi '\.emk' "$DIR/app/src/main/assets/www/index.html"; then
+                echo "APP_DIR=$DIR" >> "$GITHUB_ENV"
+                echo "Selected ZIP: $ZIP"
+                FOUND=1
+                break
+              fi
+            done < <(find "$DEST" -type f -name settings.gradle -print0)
+
+            if [ "$FOUND" -eq 1 ]; then
+              break
+            fi
+
+          done < <(find . -maxdepth 2 -type f -iname '*emk*.zip' | sort -r)
+
+          if [ "$FOUND" -ne 1 ]; then
+            echo "ERROR: No valid EMK Android ZIP found"
+            exit 1
+          fi
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - uses: android-actions/setup-android@v4
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Install SDK
+        run: |
+          sdkmanager --install \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Extract project
-        run: unzip -q ISAN-NCN-Karaoke-Android-Offline-Project.zip
-
-      - name: Install libraries
-        working-directory: ISAN-NCN-Android-App-Project
-        run: npm install --no-audit --no-fund
+      - name: Install audio libraries
+        shell: bash
+        run: |
+          set -e
+          cd "$APP_DIR"
+          npm install --no-audit --no-fund
+          npm run assets
 
       - name: Build APK
-        working-directory: ISAN-NCN-Android-App-Project
-        run: gradle :app:assembleDebug --stacktrace
+        shell: bash
+        run: |
+          set -e
+          cd "$APP_DIR"
+          gradle --no-daemon --stacktrace :app:assembleDebug
 
-      - uses: actions/upload-artifact@v4
+      - name: Prepare APK
+        shell: bash
+        run: |
+          mkdir -p release
+          cp "$APP_DIR/app/build/outputs/apk/debug/app-debug.apk" \
+            release/ISAN-Karaoke-EMK.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
-          name: ISAN-NCN-Karaoke-APK
-          path: ISAN-NCN-Android-App-Project/app/build/outputs/apk/debug/app-debug.apk
+          name: ISAN-Karaoke-EMK-APK
+          path: release/ISAN-Karaoke-EMK.apk
           if-no-files-found: error
