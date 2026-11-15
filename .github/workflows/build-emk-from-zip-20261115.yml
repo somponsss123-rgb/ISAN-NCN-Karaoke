@@ -1,0 +1,109 @@
+
+name: Build ISAN Karaoke EMK APK 2026
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-emk-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract EMK project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP="EMK_Karaoke_Android_Download.zip"
+
+          if [ ! -f "$ZIP" ]; then
+            echo "ERROR: ZIP file not found: $ZIP"
+            exit 1
+          fi
+
+          unzip -t "$ZIP"
+          mkdir -p "$RUNNER_TEMP/emk-project"
+          unzip -q "$ZIP" -d "$RUNNER_TEMP/emk-project"
+
+          APP_DIR="$RUNNER_TEMP/emk-project/ISAN-Karaoke-EMK-Android-Project"
+
+          test -f "$APP_DIR/settings.gradle"
+          test -f "$APP_DIR/package.json"
+          test -f "$APP_DIR/app/src/main/assets/www/index.html"
+
+          grep -q 'ISANKaraokeEMK' "$APP_DIR/settings.gradle"
+          grep -qi '\.emk' "$APP_DIR/app/src/main/assets/www/index.html"
+
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager --install \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install audio libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+
+          npm install --no-audit --no-fund
+          npm run assets
+
+          VENDOR="app/src/main/assets/www/vendor"
+
+          test -s "$VENDOR/libfluidsynth-2.4.6.js"
+          test -s "$VENDOR/js-synthesizer.min.js"
+          test -s "$VENDOR/jszip.min.js"
+
+          echo "Audio libraries verified"
+
+      - name: Build Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Prepare APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+
+          cp "$APP_DIR/app/build/outputs/apk/debug/app-debug.apk" \
+             release/ISAN-Karaoke-EMK-2026.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ISAN-Karaoke-EMK-2026-APK
+          path: release/ISAN-Karaoke-EMK-2026.apk
+          if-no-files-found: error
