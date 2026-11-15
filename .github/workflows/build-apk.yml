@@ -71,7 +71,7 @@ jobs:
           node-version: '22'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install SDK
         run: |
