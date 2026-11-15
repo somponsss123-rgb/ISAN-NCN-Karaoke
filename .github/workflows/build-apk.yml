@@ -1,5 +1,5 @@
   
-name: Build ISAN Karaoke EMK APK
+name: Build ISAN Karaoke EMK Folder Fix APK
 
 on:
   workflow_dispatch:
@@ -8,28 +8,27 @@ permissions:
   contents: read
 
 jobs:
-  build-emk-apk:
+  build-emk-folder-fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract existing EMK ZIP
+      - name: Extract existing EMK ZIP
         shell: bash
         run: |
           set -euo pipefail
           FOUND=0
-          DEST="$RUNNER_TEMP/emk-source"
+          DEST="$RUNNER_TEMP/emk-folder-fix"
 
           while IFS= read -r -d '' ZIP; do
-            echo "Checking ZIP: $ZIP"
+            echo "Checking existing file: $ZIP"
             rm -rf "$DEST"
             mkdir -p "$DEST"
 
             if ! unzip -tq "$ZIP" >/dev/null 2>&1; then
-              echo "Skipping invalid ZIP: $ZIP"
               continue
             fi
             unzip -q "$ZIP" -d "$DEST"
@@ -37,13 +36,16 @@ jobs:
             while IFS= read -r -d '' SETTINGS; do
               DIR="$(dirname "$SETTINGS")"
               HTML="$DIR/app/src/main/assets/www/index.html"
+              NATIVE="$DIR/app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java"
 
               if grep -q 'ISANKaraokeEMK' "$SETTINGS" \
-                 && test -f "$DIR/package.json" \
-                 && test -f "$HTML" \
-                 && grep -qi '\.emk' "$HTML"; then
+                && test -f "$DIR/package.json" \
+                && test -f "$HTML" \
+                && test -f "$NATIVE" \
+                && grep -qi '\.emk' "$HTML" \
+                && grep -q 'chooseMusicFolder' "$NATIVE"; then
                 echo "APP_DIR=$DIR" >> "$GITHUB_ENV"
-                echo "Selected EMK ZIP: $ZIP"
+                echo "Using existing ZIP: $ZIP"
                 FOUND=1
                 break
               fi
@@ -55,11 +57,95 @@ jobs:
           done < <(find . -maxdepth 2 -type f -iname '*emk*.zip' -print0 | sort -zr)
 
           if [ "$FOUND" -ne 1 ]; then
-            echo "ERROR: No ZIP with a valid EMK Android project found."
-            echo "ZIP files in repository:"
-            find . -maxdepth 2 -type f -iname '*.zip' -print
+            echo "ERROR: No matching EMK Android ZIP found."
+            find . -maxdepth 2 -type f -name '*.zip' -print
             exit 1
           fi
+
+      - name: Fix native Android folder importer
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import os
+
+          root = Path(os.environ["APP_DIR"])
+          html = root / "app/src/main/assets/www/index.html"
+          text = html.read_text(encoding="utf-8")
+
+          assert "window.AndroidNCN" in text
+          assert "pickFolder" in text
+
+          marker = '<div class="imports"><label class="filebtn">'
+
+          if 'id="nativeSavedStatus"' not in text:
+              assert text.count(marker) == 1
+              status = (
+                  '<div id="nativeSavedStatus" role="status" '
+                  'aria-live="polite" '
+                  'style="margin:9px 0;font-size:13px;color:#9fe9ce">'
+                  'ยังไม่ได้เลือกโฟลเดอร์เพลง</div>\n'
+              )
+              text = text.replace(marker, status + marker, 1)
+
+          old = (
+              "$('pickFolder').onclick=async()=>{\n"
+              " if(!window.showDirectoryPicker)"
+          )
+
+          new = """$('pickFolder').onclick=async()=>{
+           if(window.AndroidNCN){
+             if(importBusy){
+               toast('กำลังนำเข้าเพลงอยู่ กรุณารอ');
+               return;
+             }
+             $('nativeSavedStatus').textContent=
+               'กำลังเปิดตัวเลือกโฟลเดอร์ Android...';
+             try{
+               window.AndroidNCN.chooseMusicFolder();
+             }catch(err){
+               $('nativeSavedStatus').textContent=
+                 'เปิดตัวเลือกโฟลเดอร์ไม่ได้';
+               toast(String(err.message||err));
+             }
+             return;
+           }
+           if(!window.showDirectoryPicker)"""
+
+          if "window.AndroidNCN.chooseMusicFolder();" not in text:
+              assert text.count(old) == 1
+              text = text.replace(old, new, 1)
+          else:
+              if text.count(old) == 1:
+                  text = text.replace(old, new, 1)
+
+          text = text.replace(
+              "  $('nativePickMusic').onclick=()=>window.AndroidNCN.chooseMusicFolder();\n",
+              ""
+          )
+          text = text.replace(
+              "  $('nativePickSF2').onclick=()=>window.AndroidNCN.chooseSF2();\n",
+              ""
+          )
+
+          text = text.replace(
+              '📁 เลือกโฟลเดอร์ (ถ้ารองรับ)',
+              '📁 เลือกโฟลเดอร์เพลงทั้งหมด'
+          )
+          text = text.replace(
+              '🎤 ISAN NCN Karaoke',
+              '🎤 ISAN Karaoke NCN + EMK'
+          )
+
+          assert "id=\"nativeSavedStatus\"" in text
+          assert "window.AndroidNCN.chooseMusicFolder();" in text
+          assert "$('nativePickMusic')" not in text
+          assert "$('nativePickSF2')" not in text
+
+          html.write_text(text, encoding="utf-8")
+          print("Android native folder picker fixed.")
+          PYCODE
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -77,30 +163,30 @@ jobs:
         with:
           cmdline-tools-version: '14742923'
 
-      - name: Install Android API 35
-        shell: bash
+      - name: Install Android platform 35
         run: |
-          set -euo pipefail
-          sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
+          sdkmanager --install \
+            'platforms;android-35' \
+            'build-tools;35.0.0'
 
       - name: Setup Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Install and bundle audio libraries
+      - name: Install offline audio libraries
         shell: bash
         run: |
           set -euo pipefail
           cd "$APP_DIR"
           npm install --no-audit --no-fund
           npm run assets
-          VENDOR='app/src/main/assets/www/vendor'
-          test -s "$VENDOR/libfluidsynth-2.4.6.js"
-          test -s "$VENDOR/js-synthesizer.min.js"
-          test -s "$VENDOR/jszip.min.js"
 
-      - name: Build EMK APK
+          test -s app/src/main/assets/www/vendor/libfluidsynth-2.4.6.js
+          test -s app/src/main/assets/www/vendor/js-synthesizer.min.js
+          test -s app/src/main/assets/www/vendor/jszip.min.js
+
+      - name: Build fixed EMK APK
         shell: bash
         run: |
           set -euo pipefail
@@ -111,14 +197,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SRC="$APP_DIR/app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$SRC"
           mkdir -p release
-          cp "$SRC" release/ISAN-Karaoke-EMK.apk
+          cp "$APP_DIR/app/build/outputs/apk/debug/app-debug.apk" \
+             release/ISAN-Karaoke-EMK-FOLDER-FIX.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ISAN-Karaoke-EMK-APK
-          path: release/ISAN-Karaoke-EMK.apk
+          name: ISAN-Karaoke-EMK-FOLDER-FIX-APK
+          path: release/ISAN-Karaoke-EMK-FOLDER-FIX.apk
           if-no-files-found: error
+     
