@@ -1,5 +1,5 @@
 
-name: Build ISAN Karaoke EMK - Saved Catalog FIX
+name: Build ISAN Karaoke EMK - Saved Catalog FIX v2
 
 on:
   workflow_dispatch:
@@ -13,145 +13,259 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout repository
+      - name: Checkout GitHub repository
         uses: actions/checkout@v4
 
-      - name: Locate original EMK project from existing ZIPs
+      - name: Find existing EMK ZIP
         shell: bash
         run: |
           set -euo pipefail
           FOUND=0
-
+          DEST="$RUNNER_TEMP/emk-saved-catalog"
           while IFS= read -r -d '' ZIP; do
-            test "$FOUND" = 0 || break
             unzip -tq "$ZIP" >/dev/null 2>&1 || continue
-
-            DEST="$RUNNER_TEMP/emk-project"
             rm -rf "$DEST"
             mkdir -p "$DEST"
             unzip -q "$ZIP" -d "$DEST"
-
-            while IFS= read -r -d '' CFG; do
-              DIR="$(dirname "$CFG")"
+            while IFS= read -r -d '' SETTINGS; do
+              DIR="$(dirname "$SETTINGS")"
               HTML="$DIR/app/src/main/assets/www/index.html"
               JAVA="$DIR/app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java"
-
               test -f "$DIR/package.json" || continue
-              test -f "$JAVA" || continue
               test -f "$HTML" || continue
-              grep -q 'ISANKaraokeEMK' "$CFG" || continue
+              test -f "$JAVA" || continue
+              grep -q 'ISANKaraokeEMK' "$SETTINGS" || continue
               grep -qi '\.emk' "$HTML" || continue
-
-              EXPECTED='02e4958c5dd1'
-              ACTUAL="$(sha256sum "$HTML" | cut -c1-12)"
-
-              if [ "$ACTUAL" = "$EXPECTED" ]; then
+              HASH="$(sha256sum "$HTML" | cut -c1-12)"
+              if [ "$HASH" = "02e4958c5dd1" ]; then
                 echo "APP_DIR=$DIR" >> "$GITHUB_ENV"
-                echo "Selected EMK ZIP: $ZIP"
+                echo "Found compatible EMK ZIP: $ZIP"
                 FOUND=1
                 break
               fi
             done < <(find "$DEST" -type f -name settings.gradle -print0)
+            test "$FOUND" = 0 || break
           done < <(find . -maxdepth 2 -type f -iname '*emk*.zip' -print0 | sort -z)
-
           if [ "$FOUND" = 0 ]; then
-            echo 'ERROR: Could not find a compatible existing EMK ZIP.'
+            echo 'ERROR: Cannot find compatible EMK Android ZIP in GitHub repository.'
             find . -maxdepth 2 -type f -iname '*.zip' -print
             exit 1
           fi
 
-      - name: Apply permanent song catalog fix
+      - name: Install permanent song catalog in source
         shell: bash
         run: |
           set -euo pipefail
-
           python3 - <<'PY'
-          import base64, zlib
           from pathlib import Path
+          import os
+          root = Path(os.environ['APP_DIR'])
+          java = root / 'app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java'
+          html = root / 'app/src/main/assets/www/index.html'
+          j = java.read_text(encoding='utf-8')
+          h = html.read_text(encoding='utf-8')
 
-          patch = '''
-          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
+          def swap(text, before, after, label):
+              count = text.count(before)
+              if count != 1:
+                  raise RuntimeError(f'{label}: expected once, found {count}; source changed')
+              return text.replace(before, after, 1)
+
+          # Persistent file identifiers
+          j = swap(j, 'import java.util.UUID;', 'import android.util.Base64;\nimport java.nio.charset.StandardCharsets;', 'Java imports')
+          j = swap(j, 'Uri uri = fileUris.get(path);', '''Uri uri = fileUris.get(path);
+                              if (uri == null && path.startsWith("u_")) {
+                                  try {
+                                      String decoded = new String(Base64.decode(path.substring(2),
+                                              Base64.URL_SAFE | Base64.NO_WRAP), StandardCharsets.UTF_8);
+                                      Uri candidate = Uri.parse(decoded);
+                                      if ("content".equals(candidate.getScheme())) uri = candidate;
+                                  } catch (Exception ignored) { return null; }
+                              }''', 'persistent proxy')
+          j = swap(j, '''        @JavascriptInterface public void clearMusicFolder() {''', '''        @JavascriptInterface public String savedMusicTree() {
+                      return preferences.getString(KEY_TREE, "");
+                  }
+                  @JavascriptInterface public void rescanMusicFolder() {
+                      String saved = preferences.getString(KEY_TREE, "");
+                      if (!saved.isEmpty()) scanMusic(Uri.parse(saved));
+                      else notice("กรุณาเลือกโฟลเดอร์เพลงก่อน");
+                  }
+                  @JavascriptInterface public void clearMusicFolder() {''', 'Java bridge methods')
+          j = swap(j, 'if (!savedTree.isEmpty()) scanMusic(Uri.parse(savedTree));', '''if (!savedTree.isEmpty()) {
+                      js("if(window.isanRestoreNativeLibrary)window.isanRestoreNativeLibrary();" +
+                         "else window.AndroidNCN.rescanMusicFolder();");
+                  }''', 'restore catalog before scanning')
+          j = swap(j, 'String id = UUID.randomUUID().toString();', '''String id = "u_" + Base64.encodeToString(uri.toString().getBytes(StandardCharsets.UTF_8),
+                          Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);''', 'stable file IDs')
+
+          # Folder selection and catalog controls
+          h = swap(h, '<div class="imports"><label class="filebtn">', '''<button id="rescanSavedFolder" type="button" style="width:100%;margin-bottom:9px">🔄 อัปเดตรายการเพลง (เมื่อเพิ่มหรือลบเพลง)</button>
+          <div id="nativeSavedStatus" role="status" aria-live="polite">ยังไม่ได้เลือกโฟลเดอร์เพลง</div>
+          <div class="imports"><label class="filebtn">''', 'catalog controls')
+          h = h.replace('📁 เลือกโฟลเดอร์ (ถ้ารองรับ)', '📁 เลือกโฟลเดอร์เพลงทั้งหมด')
+          h = swap(h, 'const {zip=false,skipped=0}=opts;', 'const {zip=false,skipped=0,replace=false}=opts;', 'replace import flag')
+          h = swap(h, 'for(const song of state.songs)groups.set(song._groupId||song.key,{...song});', 'for(const song of (replace?[]:state.songs))groups.set(song._groupId||song.key,{...song});', 'replace songs on scan')
+          h = swap(h, "$('pickFolder').onclick=async()=>{", '''$('pickFolder').onclick=async()=>{
+           if(window.AndroidNCN){
+             if(importBusy){toast('กำลังนำเข้าเพลงอยู่');return}
+             $('nativeSavedStatus').textContent='กำลังเปิดตัวเลือกโฟลเดอร์ของ Android';
+             window.AndroidNCN.chooseMusicFolder();
+             return;
+           }''', 'Android folder picker')
+          h = swap(h, '''if(window.AndroidNCN)window.AndroidNCN.clearMusicFolder();stop();''', '''if(window.AndroidNCN){window.AndroidNCN.clearMusicFolder();eraseNativeLibraryCache().catch(console.warn)}stop();''', 'clear library cache')
+          h = swap(h, 'const smf=await song.mid.arrayBuffer();', '''if(!song.emk&&song.lyr&&(!song.lyricLines||!song.lyricLines.length)){
+                const d=parseLYR(await song.lyr.arrayBuffer());
+                song.lyricLines=d.lines;song.title=d.title||song.title;song.artist=d.artist||song.artist;
+              }
+              const smf=await song.mid.arrayBuffer();''', 'load lyrics on demand')
+          h = swap(h, 'name:item.name,size:Number(item.size||0),ncnPath:item.path||item.name,', 'nativeId:item.id,name:item.name,size:Number(item.size||0),ncnPath:item.path||item.name,', 'remember proxy ID')
+          h = swap(h, 'await runImport(async()=>{await addFiles(files)});', '''await runImport(async()=>{
+              await addFiles(files,{replace:true});
+              try{await saveNativeLibraryCache()}
+              catch(err){console.error('cache save failed',err);toast('บันทึกดัชนีเพลงไม่สำเร็จ: '+err.message)}
+            });''', 'save after full scan')
+          h = swap(h, "  $('nativePickMusic').onclick=()=>window.AndroidNCN.chooseMusicFolder();\n", '', 'remove missing nativePickMusic')
+          h = swap(h, "  $('nativePickSF2').onclick=()=>window.AndroidNCN.chooseSF2();\n", '', 'remove missing nativePickSF2')
+          h = swap(h, "  $('nativeChooseSFSettings').onclick=()=>window.AndroidNCN.chooseSF2();", '''  $('rescanSavedFolder').onclick=()=>{
+              if(importBusy){toast('กำลังนำเข้าเพลงอยู่');return}
+              $('nativeSavedStatus').textContent='กำลังอัปเดตดัชนีเพลง';
+              window.AndroidNCN.rescanMusicFolder();
+            };
+            $('nativeChooseSFSettings').onclick=()=>window.AndroidNCN.chooseSF2();''', 'manual rescan button')
+
+          # IndexedDB catalog: save song metadata only
+          catalog_js = r'''
+          const LIBDB='isan-karaoke-library-index-v1',LIBSTORE='catalog';
+
+          function openLibraryDB(){return new Promise((ok,fail)=>{
+            const q=indexedDB.open(LIBDB,1);
+            q.onupgradeneeded=()=>q.result.createObjectStore(LIBSTORE);
+            q.onsuccess=()=>ok(q.result);q.onerror=()=>fail(q.error);
+          })}
+
+          function libraryTxn(db,mode,operation){return new Promise((ok,fail)=>{
+            const tx=db.transaction(LIBSTORE,mode),q=operation(tx.objectStore(LIBSTORE));let data;
+            q.onsuccess=()=>data=q.result;q.onerror=()=>fail(q.error);
+            tx.oncomplete=()=>ok(data);tx.onerror=()=>fail(tx.error);
+          })}
+
+          function packFile(f){
+            return f?.nativeId?[f.nativeId,f.name,f.ncnPath||f.name,f.size||0]:null
+          }
+
+          function unpackFile(f){
+            return f?nativeProxyFile({id:f[0],name:f[1],path:f[2],size:f[3]}):null
+          }
+
+          async function saveNativeLibraryCache(){
+            const tree=window.AndroidNCN?.savedMusicTree?.();
+            if(!tree)throw Error('ไม่พบโฟลเดอร์เพลงที่บันทึกไว้');
+
+            const rows=state.songs.map(s=>({
+              g:s._groupId||'',k:s.key,t:s.title,a:s.artist||'',
+              f:s.format||'',mk:s.musicalKey||'',v:s.vocalChannel||'',
+              e:packFile(s.emk),m:packFile(s.mid),
+              l:packFile(s.lyr),c:packFile(s.cur)
+            }));
+
+            const db=await openLibraryDB();
+            try{
+              await libraryTxn(db,'readwrite',s=>s.put({schema:1,tree,rows},'current'))
+            }finally{
+              db.close()
+            }
+
+            $('nativeSavedStatus').textContent=`✅ บันทึกดัชนีถาวรแล้ว ${rows.length.toLocaleString('th-TH')} เพลง`;
+            reportImport('บันทึกคลังเพลงถาวรแล้ว',100,`พร้อมใช้ ${rows.length.toLocaleString('th-TH')} เพลง`,true);
+          }
+
+          async function eraseNativeLibraryCache(){
+            const db=await openLibraryDB();
+            try{
+              await libraryTxn(db,'readwrite',s=>s.delete('current'))
+            }finally{
+              db.close()
+            }
+          }
+
+          window.isanRestoreNativeLibrary=async()=>{
+            let db;
+            try{
+              const tree=window.AndroidNCN?.savedMusicTree?.();
+              if(!tree)return;
+
+              db=await openLibraryDB();
+              const cache=await libraryTxn(db,'readonly',s=>s.get('current'));
+
+              if(!cache||cache.schema!==1||cache.tree!==tree||!cache.rows?.length){
+                throw Error('No saved catalog');
+              }
+
+              const songs=cache.rows.map(r=>({
+                _groupId:r.g||undefined,
+                key:r.k,
+                title:r.t,
+                artist:r.a||'',
+                format:r.f||'',
+                musicalKey:r.mk||'',
+                vocalChannel:r.v||'',
+                emk:unpackFile(r.e),
+                mid:unpackFile(r.m),
+                lyr:unpackFile(r.l),
+                cur:unpackFile(r.c),
+                lyricLines:[],
+                _decoded:false
+              })).filter(s=>s.mid||s.emk);
+
+              if(!songs.length)throw Error('Empty catalog');
+
+              state.songs=songs;
+              renderSongs();
+
+              $('nativeSavedStatus').textContent=`✅ โหลดคลังที่บันทึกไว้ ${songs.length.toLocaleString('th-TH')} เพลง`;
+              $('importStatus').textContent=`พร้อมค้นหาและเล่น ${songs.length.toLocaleString('th-TH')} เพลง โดยไม่ต้องสแกนใหม่`;
+              $('importTracker').classList.add('hidden');
+              status('พร้อมเล่นจากคลังเพลงที่บันทึกไว้');
+
+            }catch(err){
+              console.warn('No valid saved catalog, scanning once:',err);
+              $('nativeSavedStatus').textContent='กำลังสแกนโฟลเดอร์และสร้างดัชนีครั้งแรก';
+              window.AndroidNCN.rescanMusicFolder();
+            }finally{
+              db?.close()
+            }
+          };
           '''
-          Path('/tmp/catalog.patch').write_bytes(
-              zlib.decompress(base64.b64decode(patch))
+
+          h = swap(
+              h,
+              "// ===== Native offline Android bridge; no CDN or network calls =====",
+              catalog_js + "\n// ===== Native offline Android bridge; no CDN or network calls =====",
+              'install catalog manager'
           )
+
+          java.write_text(j,encoding='utf-8')
+          html.write_text(h,encoding='utf-8')
+
+          assert 'UUID.randomUUID' not in j
+          assert 'rescanSavedFolder' in h
+          assert 'savedMusicTree()' in j
+          assert 'isanRestoreNativeLibrary' in h
+          assert "$('nativePickMusic')" not in h
+
+          script=h[h.rfind('<script>')+8:h.rfind('</script>')]
+          Path('/tmp/emk-saved-catalog-check.js').write_text(script,encoding='utf-8')
+
+          print('SUCCESS: folder importer and permanent song catalog patched.')
           PY
 
-          cd "$APP_DIR"
-          patch -p1 --batch --forward --fuzz=0 -i /tmp/catalog.patch
-
-          grep -q 'savedMusicTree()' app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java
-          grep -q 'isanRestoreNativeLibrary' app/src/main/assets/www/index.html
-          grep -q 'rescanSavedFolder' app/src/main/assets/www/index.html
-
-          python3 - <<'PY'
-          from pathlib import Path
-          html = Path(
-              'app/src/main/assets/www/index.html'
-          ).read_text(encoding='utf-8')
-
-          Path('/tmp/karaoke-check.js').write_text(
-              html[html.rfind('<script>')+8:html.rfind('</script>')]
-          )
-          PY
+      - name: Check Android source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'savedMusicTree()' "$APP_DIR/app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java"
+          grep -q 'isanRestoreNativeLibrary' "$APP_DIR/app/src/main/assets/www/index.html"
+          grep -q 'rescanSavedFolder' "$APP_DIR/app/src/main/assets/www/index.html"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -164,16 +278,16 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Validate JavaScript
-        run: node --check /tmp/karaoke-check.js
+      - name: Validate JavaScript code
+        run: node --check /tmp/emk-saved-catalog-check.js
 
-      - name: Setup Android SDK command-line tools
+      - name: Setup Android SDK command tools
         uses: android-actions/setup-android@v4
         with:
           cmdline-tools-version: '14742923'
           packages: 'platform-tools'
 
-      - name: Install Android 35 SDK
+      - name: Install Android API 35
         shell: bash
         run: |
           set -euo pipefail
@@ -185,19 +299,18 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Install offline audio engine
+      - name: Install offline music libraries
         shell: bash
         run: |
           set -euo pipefail
           cd "$APP_DIR"
           npm install --no-audit --no-fund
           npm run assets
-
           test -s app/src/main/assets/www/vendor/libfluidsynth-2.4.6.js
           test -s app/src/main/assets/www/vendor/js-synthesizer.min.js
           test -s app/src/main/assets/www/vendor/jszip.min.js
 
-      - name: Build Android APK
+      - name: Build EMK APK
         shell: bash
         run: |
           set -euo pipefail
@@ -209,12 +322,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          cp "$APP_DIR/app/build/outputs/apk/debug/app-debug.apk" \
-            release/ISAN-Karaoke-EMK-SAVED-CATALOG-FIX.apk
+          cp "$APP_DIR/app/build/outputs/apk/debug/app-debug.apk" release/ISAN-Karaoke-EMK-SAVED-CATALOG-v2.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ISAN-Karaoke-EMK-SAVED-CATALOG-FIX-APK
-          path: release/ISAN-Karaoke-EMK-SAVED-CATALOG-FIX.apk
+          name: ISAN-Karaoke-EMK-SAVED-CATALOG-v2-APK
+          path: release/ISAN-Karaoke-EMK-SAVED-CATALOG-v2.apk
           if-no-files-found: error
