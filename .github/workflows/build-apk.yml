@@ -1,5 +1,5 @@
 
-name: Build ISAN Karaoke EMK - Saved Catalog FIX v2
+name: Build ISAN Karaoke EMK - Multi Folder Saved Library
 
 on:
   workflow_dispatch:
@@ -8,264 +8,363 @@ permissions:
   contents: read
 
 jobs:
-  build-emk-saved-catalog:
+  build-emk-multi-folder:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-
     steps:
-      - name: Checkout GitHub repository
+      - name: Checkout project ZIP already on GitHub
         uses: actions/checkout@v4
 
-      - name: Find existing EMK ZIP
+      - name: Find original EMK Android project in ZIP files
         shell: bash
         run: |
           set -euo pipefail
           FOUND=0
-          DEST="$RUNNER_TEMP/emk-saved-catalog"
+          DEST="$RUNNER_TEMP/emk-source"
           while IFS= read -r -d '' ZIP; do
             unzip -tq "$ZIP" >/dev/null 2>&1 || continue
             rm -rf "$DEST"
             mkdir -p "$DEST"
             unzip -q "$ZIP" -d "$DEST"
-            while IFS= read -r -d '' SETTINGS; do
-              DIR="$(dirname "$SETTINGS")"
+            while IFS= read -r -d '' CFG; do
+              DIR="$(dirname "$CFG")"
               HTML="$DIR/app/src/main/assets/www/index.html"
               JAVA="$DIR/app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java"
-              test -f "$DIR/package.json" || continue
               test -f "$HTML" || continue
               test -f "$JAVA" || continue
-              grep -q 'ISANKaraokeEMK' "$SETTINGS" || continue
+              test -f "$DIR/package.json" || continue
+              grep -q ISANKaraokeEMK "$CFG" || continue
               grep -qi '\.emk' "$HTML" || continue
               HASH="$(sha256sum "$HTML" | cut -c1-12)"
-              if [ "$HASH" = "02e4958c5dd1" ]; then
+              if [ "$HASH" = '02e4958c5dd1' ]; then
                 echo "APP_DIR=$DIR" >> "$GITHUB_ENV"
-                echo "Found compatible EMK ZIP: $ZIP"
+                echo "Selected ZIP: $ZIP"
                 FOUND=1
                 break
               fi
             done < <(find "$DEST" -type f -name settings.gradle -print0)
             test "$FOUND" = 0 || break
           done < <(find . -maxdepth 2 -type f -iname '*emk*.zip' -print0 | sort -z)
-          if [ "$FOUND" = 0 ]; then
-            echo 'ERROR: Cannot find compatible EMK Android ZIP in GitHub repository.'
+          if [ "$FOUND" -ne 1 ]; then
+            echo 'ERROR: Compatible original EMK ZIP not found.'
             find . -maxdepth 2 -type f -iname '*.zip' -print
             exit 1
           fi
 
-      - name: Install permanent song catalog in source
+      - name: Add persistent multi-folder song catalog
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          cat > "$RUNNER_TEMP/multi_folder_patch.py" <<'PYCODE'
           from pathlib import Path
-          import os
-          root = Path(os.environ['APP_DIR'])
-          java = root / 'app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java'
-          html = root / 'app/src/main/assets/www/index.html'
-          j = java.read_text(encoding='utf-8')
-          h = html.read_text(encoding='utf-8')
+          import sys
+          root=Path(sys.argv[1])
+          java=root/'app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java'
+          html=root/'app/src/main/assets/www/index.html'
+          j=java.read_text(encoding='utf-8');h=html.read_text(encoding='utf-8')
 
-          def swap(text, before, after, label):
-              count = text.count(before)
-              if count != 1:
-                  raise RuntimeError(f'{label}: expected once, found {count}; source changed')
-              return text.replace(before, after, 1)
+          def rep(s,old,new,label):
+              n=s.count(old)
+              if n!=1: raise Exception(f'{label} match count={n}')
+              return s.replace(old,new,1)
 
-          # Persistent file identifiers
-          j = swap(j, 'import java.util.UUID;', 'import android.util.Base64;\nimport java.nio.charset.StandardCharsets;', 'Java imports')
-          j = swap(j, 'Uri uri = fileUris.get(path);', '''Uri uri = fileUris.get(path);
+          # Android native folder support
+          j=rep(j,'import java.util.UUID;', 'import android.util.Base64;\nimport java.nio.charset.StandardCharsets;', 'stable-id imports')
+          j=rep(j,'import java.util.concurrent.ConcurrentHashMap;', 'import java.util.concurrent.ConcurrentHashMap;\nimport java.util.concurrent.ExecutorService;\nimport java.util.concurrent.Executors;', 'executor imports')
+          j=rep(j,'private static final String KEY_TREE = "tree_uri";', 'private static final String KEY_TREE = "tree_uri";\n    private static final String KEY_TREES = "song_trees_v2";', 'multi-root key')
+          j=rep(j,'private final ConcurrentHashMap<String, Uri> fileUris = new ConcurrentHashMap<>();', 'private final ConcurrentHashMap<String, Uri> fileUris = new ConcurrentHashMap<>();\n    private final ExecutorService scanner = Executors.newSingleThreadExecutor();', 'scanner queue')
+
+          j=rep(j,'Uri uri = fileUris.get(path);', '''Uri uri = fileUris.get(path);
                               if (uri == null && path.startsWith("u_")) {
                                   try {
-                                      String decoded = new String(Base64.decode(path.substring(2),
-                                              Base64.URL_SAFE | Base64.NO_WRAP), StandardCharsets.UTF_8);
-                                      Uri candidate = Uri.parse(decoded);
+                                      byte[] decoded = Base64.decode(path.substring(2), Base64.URL_SAFE | Base64.NO_WRAP);
+                                      Uri candidate = Uri.parse(new String(decoded, StandardCharsets.UTF_8));
                                       if ("content".equals(candidate.getScheme())) uri = candidate;
                                   } catch (Exception ignored) { return null; }
-                              }''', 'persistent proxy')
-          j = swap(j, '''        @JavascriptInterface public void clearMusicFolder() {''', '''        @JavascriptInterface public String savedMusicTree() {
-                      return preferences.getString(KEY_TREE, "");
+                              }''','stable URI decode')
+
+          j=rep(j,'String id = UUID.randomUUID().toString();', '''String id = "u_" + Base64.encodeToString(uri.toString().getBytes(StandardCharsets.UTF_8),
+                          Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);''','stable URI encode')
+
+          j=rep(j,'''        @JavascriptInterface public void clearMusicFolder() {
+                      preferences.edit().remove(KEY_TREE).apply();
+                  }''','''        @JavascriptInterface public void clearMusicFolder() {
+                      preferences.edit().remove(KEY_TREE).remove(KEY_TREES).apply();
+                  }
+                  @JavascriptInterface public String savedMusicTrees() {
+                      JSONArray arr = new JSONArray();
+                      for (String s : musicRoots()) arr.put(s);
+                      return arr.toString();
                   }
                   @JavascriptInterface public void rescanMusicFolder() {
-                      String saved = preferences.getString(KEY_TREE, "");
-                      if (!saved.isEmpty()) scanMusic(Uri.parse(saved));
-                      else notice("กรุณาเลือกโฟลเดอร์เพลงก่อน");
-                  }
-                  @JavascriptInterface public void clearMusicFolder() {''', 'Java bridge methods')
-          j = swap(j, 'if (!savedTree.isEmpty()) scanMusic(Uri.parse(savedTree));', '''if (!savedTree.isEmpty()) {
-                      js("if(window.isanRestoreNativeLibrary)window.isanRestoreNativeLibrary();" +
-                         "else window.AndroidNCN.rescanMusicFolder();");
-                  }''', 'restore catalog before scanning')
-          j = swap(j, 'String id = UUID.randomUUID().toString();', '''String id = "u_" + Base64.encodeToString(uri.toString().getBytes(StandardCharsets.UTF_8),
-                          Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);''', 'stable file IDs')
+                      List<String> roots = musicRoots();
+                      if (roots.isEmpty()) notice("กรุณาเลือกโฟลเดอร์เพลงก่อน");
+                      for (String saved : roots) scanMusic(Uri.parse(saved));
+                  }''','bridge roots')
 
-          # Folder selection and catalog controls
-          h = swap(h, '<div class="imports"><label class="filebtn">', '''<button id="rescanSavedFolder" type="button" style="width:100%;margin-bottom:9px">🔄 อัปเดตรายการเพลง (เมื่อเพิ่มหรือลบเพลง)</button>
-          <div id="nativeSavedStatus" role="status" aria-live="polite">ยังไม่ได้เลือกโฟลเดอร์เพลง</div>
-          <div class="imports"><label class="filebtn">''', 'catalog controls')
-          h = h.replace('📁 เลือกโฟลเดอร์ (ถ้ารองรับ)', '📁 เลือกโฟลเดอร์เพลงทั้งหมด')
-          h = swap(h, 'const {zip=false,skipped=0}=opts;', 'const {zip=false,skipped=0,replace=false}=opts;', 'replace import flag')
-          h = swap(h, 'for(const song of state.songs)groups.set(song._groupId||song.key,{...song});', 'for(const song of (replace?[]:state.songs))groups.set(song._groupId||song.key,{...song});', 'replace songs on scan')
-          h = swap(h, "$('pickFolder').onclick=async()=>{", '''$('pickFolder').onclick=async()=>{
+          j=rep(j,'''            preferences.edit().putString(KEY_TREE, uri.toString()).apply();
+                      scanMusic(uri);''','''            List<String> roots = musicRoots();
+                      if (!roots.contains(uri.toString())) roots.add(uri.toString());
+                      saveMusicRoots(roots);
+                      scanMusic(uri);''','append folder')
+
+          anchor='''    private boolean keepReadPermission(Uri uri) {'''
+          addition='''    private List<String> musicRoots() {
+                  ArrayList<String> roots = new ArrayList<>();
+                  try {
+                      JSONArray arr = new JSONArray(preferences.getString(KEY_TREES, "[]"));
+                      for (int i = 0; i < arr.length(); i++) {
+                          String value = arr.optString(i, "");
+                          if (!value.isEmpty() && !roots.contains(value)) roots.add(value);
+                      }
+                  } catch (Exception ignored) {}
+                  String old = preferences.getString(KEY_TREE, "");
+                  if (!old.isEmpty() && !roots.contains(old)) roots.add(old);
+                  return roots;
+              }
+              private void saveMusicRoots(List<String> roots) {
+                  JSONArray arr = new JSONArray();
+                  for (String root : roots) arr.put(root);
+                  preferences.edit().putString(KEY_TREES, arr.toString()).remove(KEY_TREE).apply();
+              }
+          '''
+          j=rep(j,anchor,addition+anchor,'roots helper')
+
+          j=rep(j,'''        String savedTree = preferences.getString(KEY_TREE, "");
+                  emitSF2List();
+                  if (!savedTree.isEmpty()) scanMusic(Uri.parse(savedTree));
+                  else notice("เลือกโฟลเดอร์ NCN / EMK และไฟล์ SoundFont หนึ่งครั้งเพื่อให้แอปจำไว้");''','''        emitSF2List();
+                  if (!musicRoots().isEmpty()) {
+                      js("if(window.isanRestoreNativeLibrary)window.isanRestoreNativeLibrary();");
+                  } else notice("เลือกโฟลเดอร์ NCN / EMK เพื่อเพิ่มเข้าคลังเพลง");''','restore without scan')
+
+          start=j.index('    private void scanMusic(Uri treeUri) {')
+          end=j.index('    private void emitBatch(JSONArray batch) {',start)
+
+          j=j[:start]+'''    private void scanMusic(Uri treeUri) {
+                  scanner.execute(() -> {
+                      String root = treeUri.toString();
+                      js("window.isanNativeMusicStart(" + JSONObject.quote(root) + ")");
+                      boolean success = false;
+                      try {
+                          JSONArray batch = new JSONArray();
+                          int[] count = {0};
+                          String rootDocId = DocumentsContract.getTreeDocumentId(treeUri);
+                          walkTree(treeUri, rootDocId, "", 0, count, batch);
+                          if (batch.length() > 0) emitBatch(batch);
+                          success = true;
+                      } catch (Exception e) {
+                          notice("อ่านโฟลเดอร์ไม่ได้: " + e.getMessage());
+                      } finally {
+                          js("window.isanNativeMusicEnd(" + JSONObject.quote(root) + "," + success + ")");
+                      }
+                  });
+              }
+          '''+j[end:]
+          j=rep(j,'        super.onDestroy();','        scanner.shutdownNow();\n        super.onDestroy();','shutdown')
+          java.write_text(j,encoding='utf-8')
+
+          # Web player, multiple folders and persistent metadata
+          h=rep(h,'<div class="imports"><label class="filebtn">','''<button id="rescanSavedFolder" type="button" style="width:100%;margin-bottom:9px">🔄 อัปเดตรายการเพลงทุกโฟลเดอร์ (เมื่อเพลงเปลี่ยน)</button>
+          <div id="nativeSavedStatus" role="status" aria-live="polite" style="margin:9px 0;color:#9fe9ce;font-size:13px">📁 คลังเพลงจะจำทุกโฟลเดอร์ที่เพิ่ม</div>
+          <div class="imports"><label class="filebtn">''','native UI')
+          h=h.replace('📁 เลือกโฟลเดอร์ (ถ้ารองรับ)','📁 เพิ่มโฟลเดอร์เพลง (ไม่ลบเพลงเก่า)')
+
+          h=rep(h,"$('pickFolder').onclick=async()=>{",'''$('pickFolder').onclick=async()=>{
            if(window.AndroidNCN){
-             if(importBusy){toast('กำลังนำเข้าเพลงอยู่');return}
-             $('nativeSavedStatus').textContent='กำลังเปิดตัวเลือกโฟลเดอร์ของ Android';
+             if(importBusy){toast('กำลังเพิ่มรายการเพลง กรุณารอ');return;}
              window.AndroidNCN.chooseMusicFolder();
              return;
-           }''', 'Android folder picker')
-          h = swap(h, '''if(window.AndroidNCN)window.AndroidNCN.clearMusicFolder();stop();''', '''if(window.AndroidNCN){window.AndroidNCN.clearMusicFolder();eraseNativeLibraryCache().catch(console.warn)}stop();''', 'clear library cache')
-          h = swap(h, 'const smf=await song.mid.arrayBuffer();', '''if(!song.emk&&song.lyr&&(!song.lyricLines||!song.lyricLines.length)){
+           }''','native picker')
+
+          h=rep(h,'name:item.name,size:Number(item.size||0),ncnPath:item.path||item.name,','nativeId:item.id,name:item.name,size:Number(item.size||0),ncnPath:item.path||item.name,','file metadata')
+
+          h=rep(h,"catch(err){decodeErrors++;console.warn('LYR parse:',song.key,err)}","catch(err){decodeErrors++;song._decoded=true;console.warn('LYR parse:',song.key,err)}",'avoid repeated invalid LYR reading')
+
+          h=rep(h,'const key=normalizeId(f.name);','const key=f.nativeRoot ? "ncn:"+f.nativeRoot+"|"+normalizeId(f.ncnPath||f.name) : normalizeId(f.name);','NCN unique identity')
+
+          h=rep(h,'''     const item=groups.get(key);
+               item[ext==='midi'?'mid':ext]=f;''','''     const item=groups.get(key);
+               if(f.nativeRoot){item._sourceRoot=f.nativeRoot;item._groupId=key;}
+               item[ext==='midi'?'mid':ext]=f;''','NCN source folder')
+
+          h=rep(h,"const id='emk:'+normalizeId(f.name);",'''const id=f.nativeRoot ? 'emk:'+f.nativeRoot+'|'+normalizeId(f.ncnPath||f.name) : 'emk:'+normalizeId(f.name);''','EMK unique identity')
+
+          h=rep(h,'''groups.set(id,{_groupId:id,key:info.CODE||normalizeId(f.name),emk:f,''','''groups.set(id,{_groupId:id,_sourceRoot:f.nativeRoot||'',key:info.CODE||normalizeId(f.name),emk:f,''','EMK source folder')
+
+          h=rep(h,"$('clearLibrary').onclick=()=>{if(window.AndroidNCN)window.AndroidNCN.clearMusicFolder();", "$('clearLibrary').onclick=()=>{if(window.AndroidNCN){if(!confirm('ลบรายชื่อเพลงและโฟลเดอร์ที่บันทึกไว้ทั้งหมดจริงหรือไม่?'))return;window.AndroidNCN.clearMusicFolder();eraseCatalogDatabase().catch(console.error);}", 'clear confirmation')
+
+          h=rep(h,'''  $('nativePickMusic').onclick=()=>window.AndroidNCN.chooseMusicFolder();
+            $('nativePickSF2').onclick=()=>window.AndroidNCN.chooseSF2();
+          ''','', 'remove missing buttons')
+
+          h=rep(h,'''  $('nativeChooseSFSettings').onclick=()=>window.AndroidNCN.chooseSF2();''','''  $('nativeChooseSFSettings').onclick=()=>window.AndroidNCN.chooseSF2();
+            $('rescanSavedFolder').onclick=()=>{
+              if(importBusy){toast('กำลังเพิ่มเพลงอยู่ กรุณารอ');return;}
+              if(confirm('สแกนทุกโฟลเดอร์อีกครั้งเพื่ออัปเดตเพลง? ดัชนีเดิมจะยังอยู่ระหว่างสแกน'))window.AndroidNCN.rescanMusicFolder();
+            };''','manual rescan')
+
+          beg=h.index('const nativeSF2Files=[];')
+          end=h.index('window.isanNativeSF2List=',beg)
+
+          native='''const nativeSF2Files=[];
+          const isnative=!!window.AndroidNCN;
+          const CATALOG_DB='isan-karaoke-library-index-v1', CATALOG_STORE='catalog';
+          let scanSession=null, scanQueue=Promise.resolve();
+
+          function nativeProxyFile(item){
+            return {
+              nativeId:item.id,name:item.name,size:Number(item.size||0),
+              ncnPath:item.path||item.name,nativeRoot:item.root||'',
+              async arrayBuffer(){
+                const response=await fetch('/files/'+encodeURIComponent(item.id));
+                if(!response.ok)throw Error('อ่านไฟล์ '+this.name+' ไม่สำเร็จ ('+response.status+')');
+                return response.arrayBuffer();
+              }
+            };
+          }
+          function catalogOpen(){return new Promise((ok,no)=>{
+            const q=indexedDB.open(CATALOG_DB,1);
+            q.onupgradeneeded=()=>{if(!q.result.objectStoreNames.contains(CATALOG_STORE))q.result.createObjectStore(CATALOG_STORE)};
+            q.onsuccess=()=>ok(q.result);q.onerror=()=>no(q.error);
+          })}
+          async function catalogOperation(key,value,mode){
+            const db=await catalogOpen();
+            try{return await new Promise((ok,no)=>{
+              const tx=db.transaction(CATALOG_STORE,mode),store=tx.objectStore(CATALOG_STORE);
+              const req=mode==='readonly'?store.get(key):value===null?store.delete(key):store.put(value,key);
+              let result;
+              req.onsuccess=()=>result=req.result;req.onerror=()=>no(req.error);
+              tx.oncomplete=()=>ok(result);tx.onabort=()=>no(tx.error);tx.onerror=()=>no(tx.error);
+            })}finally{db.close()}
+          }
+          function catalogFile(f){return f?.nativeId?[f.nativeId,f.name,f.ncnPath||f.name,Number(f.size||0)]:null}
+          function unpackCatalogFile(f,root){return f?nativeProxyFile({id:f[0],name:f[1],path:f[2],size:f[3],root}):null}
+          function catalogRow(song){return {
+            g:song._groupId||'',k:song.key,t:song.title,a:song.artist||'',f:song.format||'',
+            mk:song.musicalKey||'',v:song.vocalChannel||'',
+            e:catalogFile(song.emk),m:catalogFile(song.mid),l:catalogFile(song.lyr),c:catalogFile(song.cur)
+          }}
+          function songFromRow(r,root){return {
+            _sourceRoot:root,_groupId:r.g||undefined,key:r.k,title:r.t,artist:r.a||'',
+            format:r.f||'',musicalKey:r.mk||'',vocalChannel:r.v||'',
+            emk:unpackCatalogFile(r.e,root),mid:unpackCatalogFile(r.m,root),
+            lyr:unpackCatalogFile(r.l,root),cur:unpackCatalogFile(r.c,root),
+            lyricLines:[],_decoded:true
+          }}
+          async function catalogRead(){
+            let cache=await catalogOperation('multi',null,'readonly');
+            if(cache?.schema===2&&cache.folders)return cache;
+            const old=await catalogOperation('current',null,'readonly');
+            if(old?.schema===1&&old.tree&&Array.isArray(old.rows)){
+              cache={schema:2,folders:{[old.tree]:old.rows},updated:Date.now()};
+              await catalogOperation('multi',cache,'readwrite');
+              return cache;
+            }
+            return {schema:2,folders:{},updated:Date.now()};
+          }
+          async function saveFolderIndex(root){
+            if(!root)throw Error('ไม่พบข้อมูลโฟลเดอร์');
+            const cache=await catalogRead();
+            const rows=state.songs.filter(s=>s._sourceRoot===root).map(catalogRow);
+            if(!rows.length)throw Error('ไม่มีเพลงที่อ่านสำเร็จ: เก็บข้อมูลเดิมไว้');
+            cache.folders[root]=rows;
+            cache.updated=Date.now();
+            await catalogOperation('multi',cache,'readwrite');
+            const count=Object.values(cache.folders).reduce((n,rows)=>n+rows.length,0);
+            $('nativeSavedStatus').textContent=`✅ บันทึกคลัง ${Object.keys(cache.folders).length} โฟลเดอร์ • รวม ${count.toLocaleString('th-TH')} เพลง`;
+          }
+          async function eraseCatalogDatabase(){
+            await catalogOperation('multi',null,'readwrite');
+            await catalogOperation('current',null,'readwrite');
+          }
+          function nativeRoots(){
+            try{return JSON.parse(window.AndroidNCN?.savedMusicTrees?.()||'[]')}catch(e){return []}
+          }
+          window.isanRestoreNativeLibrary=async()=>{
+            try{
+              const roots=nativeRoots(),cache=await catalogRead();
+              const songs=[];
+              for(const [root,rows] of Object.entries(cache.folders)){
+                if(!roots.includes(root))continue;
+                for(const row of rows){const s=songFromRow(row,root);if(s.mid||s.emk)songs.push(s)}
+              }
+              state.songs=songs.sort((a,b)=>a.title.localeCompare(b.title,'th'));
+              renderSongs();
+              const n=Object.keys(cache.folders).filter(r=>roots.includes(r)).length;
+              if(n){
+                $('nativeSavedStatus').textContent=`✅ เปิดคลัง ${n} โฟลเดอร์ • ${songs.length.toLocaleString('th-TH')} เพลง โดยไม่สแกนใหม่`;
+                $('importStatus').textContent='พร้อมเลือกเพลงและเล่นจากข้อมูลที่บันทึกไว้';
+                $('importTracker').classList.add('hidden');
+                status('พร้อมเล่นจากคลังเพลงที่บันทึกไว้');
+              }else if(roots.length){
+                $('nativeSavedStatus').textContent='กำลังสร้างดัชนีครั้งแรก';
+                window.AndroidNCN.rescanMusicFolder();
+              }
+            }catch(err){
+              console.error('Restore song catalog:',err);
+              $('nativeSavedStatus').textContent='เปิดดัชนีไม่สำเร็จ: '+err.message+' • ข้อมูลเพลงเดิมไม่ถูกลบ';
+            }
+          };
+          window.isanNativeMusicStart=(root)=>{
+            scanSession={root,files:[]};
+            reportImport('กำลังอ่านโฟลเดอร์เพลง',null,'กำลังสำรวจไฟล์ในโฟลเดอร์ที่เลือก',true);
+          };
+          window.isanNativeMusicBatch=(items)=>{
+            if(!scanSession)return;
+            for(const item of items){item.root=scanSession.root;scanSession.files.push(nativeProxyFile(item))}
+            reportImport('กำลังค้นหาเพลง EMK / NCN',null,`พบไฟล์ ${scanSession.files.length.toLocaleString('th-TH')} ไฟล์`,true);
+          };
+          window.isanNativeMusicEnd=(root,success)=>{
+            const session=scanSession;scanSession=null;
+            if(!session||session.root!==root)return;
+            scanQueue=scanQueue.then(async()=>{
+              if(!success||!session.files.length){
+                $('nativeSavedStatus').textContent='อ่านโฟลเดอร์ไม่สำเร็จหรือไม่มีเพลง • เก็บดัชนีเดิมไว้';
+                return;
+              }
+              await runImport(async()=>{
+                const previous=state.songs;
+                try{
+                  state.songs=previous.filter(s=>s._sourceRoot!==root);
+                  await addFiles(session.files);
+                  await saveFolderIndex(root);
+                }catch(e){state.songs=previous;renderSongs();throw e}
+              });
+            }).catch(e=>{console.error('Song import queue:',e);toast('บันทึกโฟลเดอร์เพลงไม่ได้: '+e.message)});
+          };
+          '''
+          h=h[:beg]+native+h[end:]
+
+          h=rep(h,'const smf=await song.mid.arrayBuffer();', '''if(!song.emk&&song.lyr&&(!song.lyricLines||!song.lyricLines.length)){
                 const d=parseLYR(await song.lyr.arrayBuffer());
                 song.lyricLines=d.lines;song.title=d.title||song.title;song.artist=d.artist||song.artist;
               }
-              const smf=await song.mid.arrayBuffer();''', 'load lyrics on demand')
-          h = swap(h, 'name:item.name,size:Number(item.size||0),ncnPath:item.path||item.name,', 'nativeId:item.id,name:item.name,size:Number(item.size||0),ncnPath:item.path||item.name,', 'remember proxy ID')
-          h = swap(h, 'await runImport(async()=>{await addFiles(files)});', '''await runImport(async()=>{
-              await addFiles(files,{replace:true});
-              try{await saveNativeLibraryCache()}
-              catch(err){console.error('cache save failed',err);toast('บันทึกดัชนีเพลงไม่สำเร็จ: '+err.message)}
-            });''', 'save after full scan')
-          h = swap(h, "  $('nativePickMusic').onclick=()=>window.AndroidNCN.chooseMusicFolder();\n", '', 'remove missing nativePickMusic')
-          h = swap(h, "  $('nativePickSF2').onclick=()=>window.AndroidNCN.chooseSF2();\n", '', 'remove missing nativePickSF2')
-          h = swap(h, "  $('nativeChooseSFSettings').onclick=()=>window.AndroidNCN.chooseSF2();", '''  $('rescanSavedFolder').onclick=()=>{
-              if(importBusy){toast('กำลังนำเข้าเพลงอยู่');return}
-              $('nativeSavedStatus').textContent='กำลังอัปเดตดัชนีเพลง';
-              window.AndroidNCN.rescanMusicFolder();
-            };
-            $('nativeChooseSFSettings').onclick=()=>window.AndroidNCN.chooseSF2();''', 'manual rescan button')
+              const smf=await song.mid.arrayBuffer();''','lazy NCN lyrics')
 
-          # IndexedDB catalog: save song metadata only
-          catalog_js = r'''
-          const LIBDB='isan-karaoke-library-index-v1',LIBSTORE='catalog';
-
-          function openLibraryDB(){return new Promise((ok,fail)=>{
-            const q=indexedDB.open(LIBDB,1);
-            q.onupgradeneeded=()=>q.result.createObjectStore(LIBSTORE);
-            q.onsuccess=()=>ok(q.result);q.onerror=()=>fail(q.error);
-          })}
-
-          function libraryTxn(db,mode,operation){return new Promise((ok,fail)=>{
-            const tx=db.transaction(LIBSTORE,mode),q=operation(tx.objectStore(LIBSTORE));let data;
-            q.onsuccess=()=>data=q.result;q.onerror=()=>fail(q.error);
-            tx.oncomplete=()=>ok(data);tx.onerror=()=>fail(tx.error);
-          })}
-
-          function packFile(f){
-            return f?.nativeId?[f.nativeId,f.name,f.ncnPath||f.name,f.size||0]:null
-          }
-
-          function unpackFile(f){
-            return f?nativeProxyFile({id:f[0],name:f[1],path:f[2],size:f[3]}):null
-          }
-
-          async function saveNativeLibraryCache(){
-            const tree=window.AndroidNCN?.savedMusicTree?.();
-            if(!tree)throw Error('ไม่พบโฟลเดอร์เพลงที่บันทึกไว้');
-
-            const rows=state.songs.map(s=>({
-              g:s._groupId||'',k:s.key,t:s.title,a:s.artist||'',
-              f:s.format||'',mk:s.musicalKey||'',v:s.vocalChannel||'',
-              e:packFile(s.emk),m:packFile(s.mid),
-              l:packFile(s.lyr),c:packFile(s.cur)
-            }));
-
-            const db=await openLibraryDB();
-            try{
-              await libraryTxn(db,'readwrite',s=>s.put({schema:1,tree,rows},'current'))
-            }finally{
-              db.close()
-            }
-
-            $('nativeSavedStatus').textContent=`✅ บันทึกดัชนีถาวรแล้ว ${rows.length.toLocaleString('th-TH')} เพลง`;
-            reportImport('บันทึกคลังเพลงถาวรแล้ว',100,`พร้อมใช้ ${rows.length.toLocaleString('th-TH')} เพลง`,true);
-          }
-
-          async function eraseNativeLibraryCache(){
-            const db=await openLibraryDB();
-            try{
-              await libraryTxn(db,'readwrite',s=>s.delete('current'))
-            }finally{
-              db.close()
-            }
-          }
-
-          window.isanRestoreNativeLibrary=async()=>{
-            let db;
-            try{
-              const tree=window.AndroidNCN?.savedMusicTree?.();
-              if(!tree)return;
-
-              db=await openLibraryDB();
-              const cache=await libraryTxn(db,'readonly',s=>s.get('current'));
-
-              if(!cache||cache.schema!==1||cache.tree!==tree||!cache.rows?.length){
-                throw Error('No saved catalog');
-              }
-
-              const songs=cache.rows.map(r=>({
-                _groupId:r.g||undefined,
-                key:r.k,
-                title:r.t,
-                artist:r.a||'',
-                format:r.f||'',
-                musicalKey:r.mk||'',
-                vocalChannel:r.v||'',
-                emk:unpackFile(r.e),
-                mid:unpackFile(r.m),
-                lyr:unpackFile(r.l),
-                cur:unpackFile(r.c),
-                lyricLines:[],
-                _decoded:false
-              })).filter(s=>s.mid||s.emk);
-
-              if(!songs.length)throw Error('Empty catalog');
-
-              state.songs=songs;
-              renderSongs();
-
-              $('nativeSavedStatus').textContent=`✅ โหลดคลังที่บันทึกไว้ ${songs.length.toLocaleString('th-TH')} เพลง`;
-              $('importStatus').textContent=`พร้อมค้นหาและเล่น ${songs.length.toLocaleString('th-TH')} เพลง โดยไม่ต้องสแกนใหม่`;
-              $('importTracker').classList.add('hidden');
-              status('พร้อมเล่นจากคลังเพลงที่บันทึกไว้');
-
-            }catch(err){
-              console.warn('No valid saved catalog, scanning once:',err);
-              $('nativeSavedStatus').textContent='กำลังสแกนโฟลเดอร์และสร้างดัชนีครั้งแรก';
-              window.AndroidNCN.rescanMusicFolder();
-            }finally{
-              db?.close()
-            }
-          };
-          '''
-
-          h = swap(
-              h,
-              "// ===== Native offline Android bridge; no CDN or network calls =====",
-              catalog_js + "\n// ===== Native offline Android bridge; no CDN or network calls =====",
-              'install catalog manager'
-          )
-
-          java.write_text(j,encoding='utf-8')
           html.write_text(h,encoding='utf-8')
 
-          assert 'UUID.randomUUID' not in j
-          assert 'rescanSavedFolder' in h
-          assert 'savedMusicTree()' in j
-          assert 'isanRestoreNativeLibrary' in h
-          assert "$('nativePickMusic')" not in h
+          app_gradle=root/'app/build.gradle'
+          g=app_gradle.read_text(encoding='utf-8')
+          g=rep(g,'versionCode 2','versionCode 3','APK versionCode')
+          g=rep(g,"versionName '1.1.0-EMK'","versionName '1.2.0-EMK-MULTI'",'APK versionName')
+          app_gradle.write_text(g,encoding='utf-8')
 
-          script=h[h.rfind('<script>')+8:h.rfind('</script>')]
-          Path('/tmp/emk-saved-catalog-check.js').write_text(script,encoding='utf-8')
+          print('Persistent multi-folder catalog patch applied')
+          PYCODE
 
-          print('SUCCESS: folder importer and permanent song catalog patched.')
-          PY
+          python3 "$RUNNER_TEMP/multi_folder_patch.py" "$APP_DIR"
 
-      - name: Check Android source changes
-        shell: bash
-        run: |
-          set -euo pipefail
-          grep -q 'savedMusicTree()' "$APP_DIR/app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java"
-          grep -q 'isanRestoreNativeLibrary' "$APP_DIR/app/src/main/assets/www/index.html"
-          grep -q 'rescanSavedFolder' "$APP_DIR/app/src/main/assets/www/index.html"
+          python3 - <<'PYCODE'
+          import os
+          from pathlib import Path
+          page=Path(os.environ['APP_DIR'])/'app/src/main/assets/www/index.html'
+          text=page.read_text(encoding='utf-8')
+          Path('/tmp/isan-emk-check.js').write_text(
+              text[text.rfind('<script>')+8:text.rfind('</script>')],
+              encoding='utf-8'
+          )
+          PYCODE
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -278,28 +377,26 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Validate JavaScript code
-        run: node --check /tmp/emk-saved-catalog-check.js
+      - name: Check JavaScript syntax
+        run: node --check /tmp/isan-emk-check.js
 
-      - name: Setup Android SDK command tools
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v4
         with:
           cmdline-tools-version: '14742923'
           packages: 'platform-tools'
 
       - name: Install Android API 35
-        shell: bash
         run: |
-          set -euo pipefail
           sdkmanager --version
           sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
 
-      - name: Setup Gradle 8.9
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Install offline music libraries
+      - name: Bundle offline audio libraries
         shell: bash
         run: |
           set -euo pipefail
@@ -310,23 +407,16 @@ jobs:
           test -s app/src/main/assets/www/vendor/js-synthesizer.min.js
           test -s app/src/main/assets/www/vendor/jszip.min.js
 
-      - name: Build EMK APK
+      - name: Build Android APK
         shell: bash
         run: |
           set -euo pipefail
           cd "$APP_DIR"
           gradle --no-daemon --stacktrace :app:assembleDebug
 
-      - name: Prepare APK
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p release
-          cp "$APP_DIR/app/build/outputs/apk/debug/app-debug.apk" release/ISAN-Karaoke-EMK-SAVED-CATALOG-v2.apk
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ISAN-Karaoke-EMK-SAVED-CATALOG-v2-APK
-          path: release/ISAN-Karaoke-EMK-SAVED-CATALOG-v2.apk
+          name: ISAN-Karaoke-EMK-MULTI-FOLDER-APK
+          path: ${{ env.APP_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
