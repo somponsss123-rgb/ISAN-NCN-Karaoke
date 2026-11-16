@@ -1,5 +1,5 @@
-  
-name: Build ISAN Karaoke EMK Folder Fix APK
+
+name: Build ISAN Karaoke EMK - Saved Song Catalog
 
 on:
   workflow_dispatch:
@@ -8,143 +8,136 @@ permissions:
   contents: read
 
 jobs:
-  build-emk-folder-fix:
-    runs-on: ubuntu-latest
+  build-emk-cached-apk:
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
-      - name: Checkout repository
+      - name: Checkout existing repository
         uses: actions/checkout@v4
 
-      - name: Extract existing EMK ZIP
+      - name: Find existing EMK project ZIP automatically
         shell: bash
         run: |
           set -euo pipefail
           FOUND=0
-          DEST="$RUNNER_TEMP/emk-folder-fix"
-
+          DEST="$RUNNER_TEMP/emk-sources"
           while IFS= read -r -d '' ZIP; do
-            echo "Checking existing file: $ZIP"
+            echo "Checking existing ZIP: $ZIP"
             rm -rf "$DEST"
             mkdir -p "$DEST"
-
-            if ! unzip -tq "$ZIP" >/dev/null 2>&1; then
-              continue
-            fi
+            if ! unzip -tq "$ZIP" >/dev/null 2>&1; then continue; fi
             unzip -q "$ZIP" -d "$DEST"
-
             while IFS= read -r -d '' SETTINGS; do
               DIR="$(dirname "$SETTINGS")"
               HTML="$DIR/app/src/main/assets/www/index.html"
-              NATIVE="$DIR/app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java"
-
+              JAVA="$DIR/app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java"
               if grep -q 'ISANKaraokeEMK' "$SETTINGS" \
-                && test -f "$DIR/package.json" \
-                && test -f "$HTML" \
-                && test -f "$NATIVE" \
-                && grep -qi '\.emk' "$HTML" \
-                && grep -q 'chooseMusicFolder' "$NATIVE"; then
+                 && test -f "$DIR/package.json" \
+                 && test -f "$HTML" && test -f "$JAVA" \
+                 && grep -qi '\.emk' "$HTML"; then
                 echo "APP_DIR=$DIR" >> "$GITHUB_ENV"
-                echo "Using existing ZIP: $ZIP"
+                echo "EMK project selected from: $ZIP"
                 FOUND=1
                 break
               fi
             done < <(find "$DEST" -type f -name settings.gradle -print0)
-
-            if [ "$FOUND" -eq 1 ]; then
-              break
-            fi
+            if [ "$FOUND" -eq 1 ]; then break; fi
           done < <(find . -maxdepth 2 -type f -iname '*emk*.zip' -print0 | sort -zr)
-
           if [ "$FOUND" -ne 1 ]; then
-            echo "ERROR: No matching EMK Android ZIP found."
+            echo "ERROR: Existing EMK project ZIP not found."
             find . -maxdepth 2 -type f -name '*.zip' -print
             exit 1
           fi
 
-      - name: Fix native Android folder importer
+      - name: Patch permanent offline song catalog and folder picker
         shell: bash
         run: |
           set -euo pipefail
+          python3 - "$APP_DIR" <<'PYCODE'
+          import base64, zlib
+          payload = (
+          "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"
+          "bWgywDtPshejEBrEK8Li50av8LKi6eIw=="
+          )
+          exec(compile(zlib.decompress(base64.b64decode(payload)),
+                       'catalog_patch.py', 'exec'))
+          PYCODE
+
+      - name: Verify patched source
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'savedMusicTree()' "$APP_DIR/app/src/main/java/com/isan/ncnkaraoke/offline/MainActivity.java"
+          grep -q 'isanRestoreNativeLibrary' "$APP_DIR/app/src/main/assets/www/index.html"
+          grep -q 'rescanSavedFolder' "$APP_DIR/app/src/main/assets/www/index.html"
           python3 - <<'PYCODE'
           from pathlib import Path
           import os
-
-          root = Path(os.environ["APP_DIR"])
-          html = root / "app/src/main/assets/www/index.html"
-          text = html.read_text(encoding="utf-8")
-
-          assert "window.AndroidNCN" in text
-          assert "pickFolder" in text
-
-          marker = '<div class="imports"><label class="filebtn">'
-
-          if 'id="nativeSavedStatus"' not in text:
-              assert text.count(marker) == 1
-              status = (
-                  '<div id="nativeSavedStatus" role="status" '
-                  'aria-live="polite" '
-                  'style="margin:9px 0;font-size:13px;color:#9fe9ce">'
-                  'ยังไม่ได้เลือกโฟลเดอร์เพลง</div>\n'
-              )
-              text = text.replace(marker, status + marker, 1)
-
-          old = (
-              "$('pickFolder').onclick=async()=>{\n"
-              " if(!window.showDirectoryPicker)"
-          )
-
-          new = """$('pickFolder').onclick=async()=>{
-           if(window.AndroidNCN){
-             if(importBusy){
-               toast('กำลังนำเข้าเพลงอยู่ กรุณารอ');
-               return;
-             }
-             $('nativeSavedStatus').textContent=
-               'กำลังเปิดตัวเลือกโฟลเดอร์ Android...';
-             try{
-               window.AndroidNCN.chooseMusicFolder();
-             }catch(err){
-               $('nativeSavedStatus').textContent=
-                 'เปิดตัวเลือกโฟลเดอร์ไม่ได้';
-               toast(String(err.message||err));
-             }
-             return;
-           }
-           if(!window.showDirectoryPicker)"""
-
-          if "window.AndroidNCN.chooseMusicFolder();" not in text:
-              assert text.count(old) == 1
-              text = text.replace(old, new, 1)
-          else:
-              if text.count(old) == 1:
-                  text = text.replace(old, new, 1)
-
-          text = text.replace(
-              "  $('nativePickMusic').onclick=()=>window.AndroidNCN.chooseMusicFolder();\n",
-              ""
-          )
-          text = text.replace(
-              "  $('nativePickSF2').onclick=()=>window.AndroidNCN.chooseSF2();\n",
-              ""
-          )
-
-          text = text.replace(
-              '📁 เลือกโฟลเดอร์ (ถ้ารองรับ)',
-              '📁 เลือกโฟลเดอร์เพลงทั้งหมด'
-          )
-          text = text.replace(
-              '🎤 ISAN NCN Karaoke',
-              '🎤 ISAN Karaoke NCN + EMK'
-          )
-
-          assert "id=\"nativeSavedStatus\"" in text
-          assert "window.AndroidNCN.chooseMusicFolder();" in text
-          assert "$('nativePickMusic')" not in text
-          assert "$('nativePickSF2')" not in text
-
-          html.write_text(text, encoding="utf-8")
-          print("Android native folder picker fixed.")
+          h=Path(os.environ['APP_DIR'])/'app/src/main/assets/www/index.html'
+          text=h.read_text()
+          js=text[text.rfind('<script>')+8:text.rfind('</script>')]
+          Path('/tmp/karaoke-catalog-check.js').write_text(js)
           PYCODE
 
       - name: Setup Java 17
@@ -153,58 +146,56 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Node.js 22
+      - name: Setup Node 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          cmdline-tools-version: '14742923'
+      - name: Verify JavaScript syntax
+        run: node --check /tmp/karaoke-catalog-check.js
 
-      - name: Install Android platform 35
+      - name: Use preinstalled Android SDK and install API 35
+        shell: bash
         run: |
-          sdkmanager --install \
-            'platforms;android-35' \
-            'build-tools;35.0.0'
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}" >> "$GITHUB_ENV"
+          sdkmanager --version
+          sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
 
       - name: Setup Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Install offline audio libraries
+      - name: Package offline audio libraries
         shell: bash
         run: |
           set -euo pipefail
           cd "$APP_DIR"
           npm install --no-audit --no-fund
           npm run assets
-
           test -s app/src/main/assets/www/vendor/libfluidsynth-2.4.6.js
           test -s app/src/main/assets/www/vendor/js-synthesizer.min.js
           test -s app/src/main/assets/www/vendor/jszip.min.js
 
-      - name: Build fixed EMK APK
+      - name: Build updated APK
         shell: bash
         run: |
           set -euo pipefail
           cd "$APP_DIR"
           gradle --no-daemon --stacktrace :app:assembleDebug
 
-      - name: Prepare APK
+      - name: Prepare APK artifact
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release
           cp "$APP_DIR/app/build/outputs/apk/debug/app-debug.apk" \
-             release/ISAN-Karaoke-EMK-FOLDER-FIX.apk
+            release/ISAN-Karaoke-EMK-SAVED-CATALOG.apk
 
-      - name: Upload APK
+      - name: Upload new APK
         uses: actions/upload-artifact@v4
         with:
-          name: ISAN-Karaoke-EMK-FOLDER-FIX-APK
-          path: release/ISAN-Karaoke-EMK-FOLDER-FIX.apk
+          name: ISAN-Karaoke-EMK-SAVED-CATALOG-APK
+          path: release/ISAN-Karaoke-EMK-SAVED-CATALOG.apk
           if-no-files-found: error
-     
